@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 
 	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/proto"
@@ -173,6 +174,13 @@ Loop:
 		return ni < nj
 	})
 
+	if v := req.Form.Get("squash"); len(v) > 0 {
+		dur, _ := strconv.Atoi(v)
+		if dur > 0 {
+			vec = sqaush(vec, int64(dur*1000))
+		}
+	}
+
 	externalLabels := h.config.GlobalConfig.ExternalLabels.Map()
 	if _, ok := externalLabels[model.InstanceLabel]; !ok {
 		externalLabels[model.InstanceLabel] = ""
@@ -317,4 +325,62 @@ Loop:
 			level.Error(h.logger).Log("msg", "federation failed", "err", err)
 		}
 	}
+}
+
+func removeInstanceLabel(src labels.Labels) labels.Labels {
+	dst := make(labels.Labels, 0, len(src)-1)
+	for _, v := range src {
+		if v.Name != labels.InstanceName {
+			dst = append(dst, v)
+		}
+	}
+	return dst
+}
+
+func sqaush(vec promql.Vector, dur int64) promql.Vector {
+	//squash(vec, 10*1000) //10s
+	//remove instance and update time
+	for i := 0; i < len(vec); i++ {
+		vec[i].Metric = removeInstanceLabel(vec[i].Metric)
+		vec[i].T = vec[i].T - int64(vec[i].T%dur)
+	}
+
+	//sort
+	slices.SortFunc(vec, func(a, b promql.Sample) bool {
+		ni, nj := a.Metric.Hash(), b.Metric.Hash()
+		if ni < nj {
+			return true
+		} else if ni == nj {
+			return a.T < b.T
+		}
+		return false
+	})
+
+	vec1 := make(promql.Vector, 0, 8000)
+	var prevVec *promql.Sample
+
+	for i := 0; i < len(vec); i++ {
+		if vec[i].H != nil {
+			vec1 = append(vec1, vec[i])
+			prevVec = nil
+			continue
+		}
+
+		if prevVec == nil {
+			prevVec = &vec[i]
+			continue
+		}
+
+		if prevVec.Metric.Hash() == vec[i].Metric.Hash() && prevVec.T == vec[i].T {
+			prevVec.F = prevVec.F + vec[i].F
+			continue
+		}
+
+		vec1 = append(vec1, *prevVec)
+		prevVec = &vec[i]
+	}
+	if prevVec != nil {
+		vec1 = append(vec1, *prevVec)
+	}
+	return vec1
 }
