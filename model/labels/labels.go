@@ -136,6 +136,20 @@ func (ls Labels) MatchLabels(on bool, names ...string) Labels {
 	return matchedLabels
 }
 
+// RemoveLabel returns a subset of Labels that matches/does not match with the provided label names based on the 'on' boolean.
+// If on is set to true, it returns the subset of labels that match with the provided label names and its inverse when 'on' is set to false.
+func (ls Labels) RemoveLabel(excludeLabel string) Labels {
+	matchedLabels := Labels{}
+
+	for _, v := range ls {
+		if v.Name != excludeLabel {
+			matchedLabels = append(matchedLabels, v)
+		}
+	}
+
+	return matchedLabels
+}
+
 // Hash returns a hash value for the label set.
 // Note: the result is not guaranteed to be consistent across different runs of Prometheus.
 func (ls Labels) Hash() uint64 {

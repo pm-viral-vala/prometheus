@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/proto"
@@ -80,6 +81,14 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 		enc    = expfmt.NewEncoder(w, format)
 	)
 	w.Header().Set("Content-Type", string(format))
+
+	if v := req.Form.Get("lookbackDeltaStart"); len(v) > 0 {
+		dur, _ := strconv.Atoi(v)
+		now := h.now().Time()
+		startTime := now.Add(time.Duration(dur) * time.Second)
+		mint = timestamp.FromTime(startTime.Add(-h.lookbackDelta))
+		maxt = timestamp.FromTime(startTime)
+	}
 
 	q, err := h.localStorage.Querier(req.Context(), mint, maxt)
 	if err != nil {
@@ -327,21 +336,11 @@ Loop:
 	}
 }
 
-func removeInstanceLabel(src labels.Labels) labels.Labels {
-	dst := make(labels.Labels, 0, len(src)-1)
-	for _, v := range src {
-		if v.Name != labels.InstanceName {
-			dst = append(dst, v)
-		}
-	}
-	return dst
-}
-
 func sqaush(vec promql.Vector, dur int64) promql.Vector {
 	//squash(vec, 10*1000) //10s
 	//remove instance and update time
 	for i := 0; i < len(vec); i++ {
-		vec[i].Metric = removeInstanceLabel(vec[i].Metric)
+		vec[i].Metric = vec[i].Metric.RemoveLabel(labels.InstanceName)
 		vec[i].T = vec[i].T - int64(vec[i].T%dur)
 	}
 
