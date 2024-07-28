@@ -475,9 +475,15 @@ func (c *GlobalConfig) isZero() bool {
 type ScrapeConfigs struct {
 	ScrapeConfigs []*ScrapeConfig `yaml:"scrape_configs,omitempty"`
 }
+type Session struct {
+	Enabled   bool `yaml:"enabled"`
+	BatchSize int  `yaml:"batch_size"`
+	Threads   int  `yaml:"threads"`
+}
 
 // ScrapeConfig configures a scraping unit for Prometheus.
 type ScrapeConfig struct {
+	Session Session `yaml:"session"`
 	// The job name to which the job label is set by default.
 	JobName string `yaml:"job_name"`
 	// Indicator whether the scraped metrics should remain unmodified.

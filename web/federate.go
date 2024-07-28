@@ -14,9 +14,11 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 
 	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/proto"
@@ -36,6 +38,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/util/session"
 )
 
 var (
@@ -47,6 +50,7 @@ var (
 		Name: "prometheus_web_federation_warnings_total",
 		Help: "Total number of warnings that occurred while sending federation responses.",
 	})
+	sessionManager = session.NewSessionManager[promql.Sample]()
 )
 
 func registerFederationMetrics(r prometheus.Registerer) {
@@ -62,121 +66,22 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var matcherSets [][]*labels.Matcher
-	for _, s := range req.Form["match[]"] {
-		matchers, err := parser.ParseMetricSelector(s)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		matcherSets = append(matcherSets, matchers)
-	}
-
 	var (
-		mint   = timestamp.FromTime(h.now().Time().Add(-h.lookbackDelta))
-		maxt   = timestamp.FromTime(h.now().Time())
 		format = expfmt.Negotiate(req.Header)
 		enc    = expfmt.NewEncoder(w, format)
 	)
 	w.Header().Set("Content-Type", string(format))
 
-	q, err := h.localStorage.Querier(req.Context(), mint, maxt)
-	if err != nil {
-		federationErrors.Inc()
-		if errors.Cause(err) == tsdb.ErrNotReady {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	vec := h.getCachedVector(w, req)
+	if vec == nil {
 		return
 	}
-	defer q.Close()
-
-	vec := make(promql.Vector, 0, 8000)
-
-	hints := &storage.SelectHints{Start: mint, End: maxt}
-
-	var sets []storage.SeriesSet
-	for _, mset := range matcherSets {
-		s := q.Select(true, hints, mset...)
-		sets = append(sets, s)
-	}
-
-	set := storage.NewMergeSeriesSet(sets, storage.ChainedSeriesMerge)
-	it := storage.NewBuffer(int64(h.lookbackDelta / 1e6))
-	var chkIter chunkenc.Iterator
-Loop:
-	for set.Next() {
-		s := set.At()
-
-		// TODO(fabxc): allow fast path for most recent sample either
-		// in the storage itself or caching layer in Prometheus.
-		chkIter = s.Iterator(chkIter)
-		it.Reset(chkIter)
-
-		var (
-			t  int64
-			f  float64
-			fh *histogram.FloatHistogram
-		)
-		valueType := it.Seek(maxt)
-		switch valueType {
-		case chunkenc.ValFloat:
-			t, f = it.At()
-		case chunkenc.ValFloatHistogram, chunkenc.ValHistogram:
-			t, fh = it.AtFloatHistogram()
-		default:
-			sample, ok := it.PeekBack(1)
-			if !ok {
-				continue Loop
-			}
-			t = sample.T()
-			switch sample.Type() {
-			case chunkenc.ValFloat:
-				f = sample.F()
-			case chunkenc.ValHistogram:
-				fh = sample.H().ToFloat()
-			case chunkenc.ValFloatHistogram:
-				fh = sample.FH()
-			default:
-				continue Loop
-			}
-		}
-		// The exposition formats do not support stale markers, so drop them. This
-		// is good enough for staleness handling of federated data, as the
-		// interval-based limits on staleness will do the right thing for supported
-		// use cases (which is to say federating aggregated time series).
-		if value.IsStaleNaN(f) || (fh != nil && value.IsStaleNaN(fh.Sum)) {
-			continue
-		}
-
-		vec = append(vec, promql.Sample{
-			Metric: s.Labels(),
-			T:      t,
-			F:      f,
-			H:      fh,
-		})
-	}
-	if ws := set.Warnings(); len(ws) > 0 {
-		level.Debug(h.logger).Log("msg", "Federation select returned warnings", "warnings", ws)
-		federationWarnings.Add(float64(len(ws)))
-	}
-	if set.Err() != nil {
-		federationErrors.Inc()
-		http.Error(w, set.Err().Error(), http.StatusInternalServerError)
-		return
-	}
-
-	slices.SortFunc(vec, func(a, b promql.Sample) bool {
-		ni := a.Metric.Get(labels.MetricName)
-		nj := b.Metric.Get(labels.MetricName)
-		return ni < nj
-	})
 
 	externalLabels := h.config.GlobalConfig.ExternalLabels.Map()
 	if _, ok := externalLabels[model.InstanceLabel]; !ok {
 		externalLabels[model.InstanceLabel] = ""
 	}
+
 	externalLabelNames := make([]string, 0, len(externalLabels))
 	for ln := range externalLabels {
 		externalLabelNames = append(externalLabelNames, ln)
@@ -317,4 +222,150 @@ Loop:
 			level.Error(h.logger).Log("msg", "federation failed", "err", err)
 		}
 	}
+}
+
+func (h *Handler) getVector(w http.ResponseWriter, req *http.Request) promql.Vector {
+	var matcherSets [][]*labels.Matcher
+	for _, s := range req.Form["match[]"] {
+		matchers, err := parser.ParseMetricSelector(s)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return nil
+		}
+		matcherSets = append(matcherSets, matchers)
+	}
+
+	var (
+		mint = timestamp.FromTime(h.now().Time().Add(-h.lookbackDelta))
+		maxt = timestamp.FromTime(h.now().Time())
+	)
+
+	q, err := h.localStorage.Querier(req.Context(), mint, maxt)
+	if err != nil {
+		federationErrors.Inc()
+		if errors.Cause(err) == tsdb.ErrNotReady {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return nil
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	defer q.Close()
+
+	vec := make(promql.Vector, 0, 8000)
+
+	hints := &storage.SelectHints{Start: mint, End: maxt}
+
+	var sets []storage.SeriesSet
+	for _, mset := range matcherSets {
+		s := q.Select(true, hints, mset...)
+		sets = append(sets, s)
+	}
+
+	set := storage.NewMergeSeriesSet(sets, storage.ChainedSeriesMerge)
+	it := storage.NewBuffer(int64(h.lookbackDelta / 1e6))
+	var chkIter chunkenc.Iterator
+Loop:
+	for set.Next() {
+		s := set.At()
+
+		// TODO(fabxc): allow fast path for most recent sample either
+		// in the storage itself or caching layer in Prometheus.
+		chkIter = s.Iterator(chkIter)
+		it.Reset(chkIter)
+
+		var (
+			t  int64
+			f  float64
+			fh *histogram.FloatHistogram
+		)
+		valueType := it.Seek(maxt)
+		switch valueType {
+		case chunkenc.ValFloat:
+			t, f = it.At()
+		case chunkenc.ValFloatHistogram, chunkenc.ValHistogram:
+			t, fh = it.AtFloatHistogram()
+		default:
+			sample, ok := it.PeekBack(1)
+			if !ok {
+				continue Loop
+			}
+			t = sample.T()
+			switch sample.Type() {
+			case chunkenc.ValFloat:
+				f = sample.F()
+			case chunkenc.ValHistogram:
+				fh = sample.H().ToFloat()
+			case chunkenc.ValFloatHistogram:
+				fh = sample.FH()
+			default:
+				continue Loop
+			}
+		}
+		// The exposition formats do not support stale markers, so drop them. This
+		// is good enough for staleness handling of federated data, as the
+		// interval-based limits on staleness will do the right thing for supported
+		// use cases (which is to say federating aggregated time series).
+		if value.IsStaleNaN(f) || (fh != nil && value.IsStaleNaN(fh.Sum)) {
+			continue
+		}
+
+		vec = append(vec, promql.Sample{
+			Metric: s.Labels(),
+			T:      t,
+			F:      f,
+			H:      fh,
+		})
+	}
+	if ws := set.Warnings(); len(ws) > 0 {
+		level.Debug(h.logger).Log("msg", "Federation select returned warnings", "warnings", ws)
+		federationWarnings.Add(float64(len(ws)))
+	}
+	if set.Err() != nil {
+		federationErrors.Inc()
+		http.Error(w, set.Err().Error(), http.StatusInternalServerError)
+		return nil
+	}
+
+	slices.SortFunc(vec, func(a, b promql.Sample) bool {
+		ni := a.Metric.Get(labels.MetricName)
+		nj := b.Metric.Get(labels.MetricName)
+		return ni < nj
+	})
+
+	return vec
+}
+
+func (h *Handler) getCachedVector(w http.ResponseWriter, req *http.Request) promql.Vector {
+	if req.Form.Get("session") == "true" {
+		sessionID := req.Form.Get("sessionid")
+		var ss *session.Session[promql.Sample]
+
+		if len(sessionID) == 0 {
+			//new session
+			vec := h.getVector(w, req)
+			ss = sessionManager.AddSession(vec)
+
+			w.Header().Set("sessionid", ss.ID())
+			w.Header().Set("size", strconv.Itoa(ss.Count()))
+
+			info := session.SessionInfo{
+				SessionID: ss.ID(),
+				Size:      ss.Count(),
+			}
+			response, _ := json.Marshal(&info)
+			w.Write(response)
+			return nil
+		}
+
+		ss = sessionManager.GetSession(sessionID)
+		if ss != nil {
+			start, _ := strconv.Atoi(req.Form.Get("start"))
+			end, _ := strconv.Atoi(req.Form.Get("end"))
+			if end > 0 {
+				return ss.Data(start, end)
+			}
+		}
+	}
+	return h.getVector(w, req)
 }

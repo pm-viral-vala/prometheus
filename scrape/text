@@ -1,0 +1,121 @@
+/*
+func (ts *targetScraper) test(ctx context.Context) {
+	if ts.session {
+		_starttime := time.Now()
+		ss, err := ts.getSessionInfo(ctx)
+		if err != nil {
+			fmt.Printf("\nfailure_test")
+			return
+		}
+		if ss.Size > 0 {
+			sc := session.NewSessionClient(ctx, int64(ss.Size), 100, 10, func(start, end int) error {
+				//scrape with parameters session=true, sessionid=, start, end
+				buf := bytes.Buffer{}
+
+				extraParams := url.Values{}
+				extraParams.Set("session", "true")
+				extraParams.Set("sessionid", ss.SessionID)
+				extraParams.Set("start", strconv.Itoa(start))
+				extraParams.Set("end", strconv.Itoa(end))
+
+				_starttime := time.Now()
+				_, err := ts.multiScrape(ctx, extraParams, &buf)
+
+				fmt.Printf("\nsessionid:[%v] size:[%v] start:[%v] end:[%v] ts:[%v] buf:[%v] err:[%v]", ss.SessionID, ss.Size, start, end, time.Since(_starttime), buf.Len(), err)
+
+				return nil
+			})
+			sc.Wait()
+		}
+		fmt.Printf("\nsessionid:[%v] size:[%v] ts:[%v]", ss.SessionID, ss.Size, time.Since(_starttime))
+	}
+}
+*/
+
+/*
+func (sl *scrapeLoop) onlyScrape(appendTime time.Time, extraparams url.Values, errc chan<- error) {
+	start := time.Now()
+
+	b := sl.buffers.Get(sl.lastScrapeSize).([]byte)
+	defer sl.buffers.Put(b)
+	buf := bytes.NewBuffer(b)
+
+	var total, added, seriesAdded, bytes int
+	var err, appErr, scrapeErr error
+
+	app := sl.appender(sl.appenderCtx)
+	defer func() {
+		if err != nil {
+			app.Rollback()
+			return
+		}
+		err = app.Commit()
+		if err != nil {
+			level.Error(sl.l).Log("msg", "Scrape commit failed", "err", err)
+		}
+	}()
+
+	defer func() {
+		if err = sl.report(app, appendTime, time.Since(start), total, added, seriesAdded, bytes, scrapeErr); err != nil {
+			level.Warn(sl.l).Log("msg", "Appending scrape report failed", "err", err)
+		}
+	}()
+
+	if forcedErr := sl.getForcedError(); forcedErr != nil {
+		scrapeErr = forcedErr
+		// Add stale markers.
+		if _, _, _, err := sl.append(app, []byte{}, "", appendTime); err != nil {
+			app.Rollback()
+			app = sl.appender(sl.appenderCtx)
+			level.Warn(sl.l).Log("msg", "Append failed", "err", err)
+		}
+		if errc != nil {
+			errc <- forcedErr
+		}
+	}
+
+	var contentType string
+	_starttime := time.Now()
+	contentType, scrapeErr = sl.scraper.multiScrape(sl.parentCtx, extraparams, buf)
+	fmt.Printf("\nsessionid:[%v] start:[%v] end:[%v] ts:[%v] buf:[%v] err:[%v]",
+		extraparams.Get("sessionid"), extraparams.Get("start"), extraparams.Get("end"),
+		time.Since(_starttime), buf.Len(), err)
+
+	if scrapeErr == nil {
+		b = buf.Bytes()
+		// NOTE: There were issues with misbehaving clients in the past
+		// that occasionally returned empty results. We don't want those
+		// to falsely reset our buffer size.
+		if len(b) > 0 {
+			sl.lastScrapeSize = len(b)
+		}
+		bytes = len(b)
+	} else {
+		level.Debug(sl.l).Log("msg", "Scrape failed", "err", scrapeErr)
+		if errc != nil {
+			errc <- scrapeErr
+		}
+		if errors.Is(scrapeErr, errBodySizeLimit) {
+			bytes = -1
+		}
+	}
+
+	total, added, seriesAdded, appErr = sl.append(app, b, contentType, appendTime)
+	if appErr != nil {
+		app.Rollback()
+		app = sl.appender(sl.appenderCtx)
+		level.Debug(sl.l).Log("msg", "Append failed", "err", appErr)
+		// The append failed, probably due to a parse error or sample limit.
+		// Call sl.append again with an empty scrape to trigger stale markers.
+		if _, _, _, err := sl.append(app, []byte{}, "", appendTime); err != nil {
+			app.Rollback()
+			app = sl.appender(sl.appenderCtx)
+			level.Warn(sl.l).Log("msg", "Append failed", "err", err)
+		}
+	}
+
+	if scrapeErr == nil {
+		scrapeErr = appErr
+	}
+}
+*/

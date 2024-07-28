@@ -22,6 +22,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"sync"
@@ -48,6 +49,7 @@ import (
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/pool"
+	"github.com/prometheus/prometheus/util/session"
 )
 
 // ScrapeTimestampTolerance is the tolerance for scrape appends timestamps
@@ -268,6 +270,7 @@ type scrapeLoopOptions struct {
 	labelLimits             *labelLimits
 	honorLabels             bool
 	honorTimestamps         bool
+	sessionEnabled          bool
 	interval                time.Duration
 	timeout                 time.Duration
 	scrapeClassicHistograms bool
@@ -338,6 +341,7 @@ func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, offsetSeed 
 			options.EnableMetadataStorage,
 			opts.target,
 			options.PassMetadataInContext,
+			cfg.Session,
 		)
 	}
 	targetScrapePoolTargetLimit.WithLabelValues(sp.config.JobName).Set(float64(sp.config.TargetLimit))
@@ -639,6 +643,7 @@ func (sp *scrapePool) sync(targets []*Target) {
 	}
 	for _, l := range uniqueLoops {
 		if l != nil {
+			fmt.Printf("\n\nsync started")
 			go l.run(nil)
 		}
 	}
@@ -785,6 +790,8 @@ func appender(app storage.Appender, sampleLimit, bucketLimit int) storage.Append
 
 // A scraper retrieves samples and accepts a status report at the end.
 type scraper interface {
+	getSessionInfo(ctx context.Context) (*session.SessionInfo, error)
+	multiScrape(ctx context.Context, extraParams url.Values, w io.Writer) (string, error)
 	scrape(ctx context.Context, w io.Writer) (string, error)
 	Report(start time.Time, dur time.Duration, err error)
 	offset(interval time.Duration, offsetSeed uint64) time.Duration
@@ -815,6 +822,11 @@ const (
 var UserAgent = fmt.Sprintf("Prometheus/%s", version.Version)
 
 func (s *targetScraper) scrape(ctx context.Context, w io.Writer) (string, error) {
+	_startTime := time.Now()
+	defer func() {
+		fmt.Printf("\n[hackathon] Scrape Time:%v ", time.Since(_startTime))
+	}()
+
 	if s.req == nil {
 		req, err := http.NewRequest("GET", s.URL().String(), nil)
 		if err != nil {
@@ -928,6 +940,7 @@ type scrapeLoop struct {
 
 	reportExtraMetrics  bool
 	appendMetadataToWAL bool
+	session             config.Session
 }
 
 // scrapeCache tracks mappings of exposed metric strings to label sets and
@@ -1199,6 +1212,7 @@ func newScrapeLoop(ctx context.Context,
 	appendMetadataToWAL bool,
 	target *Target,
 	passMetadataInContext bool,
+	session config.Session,
 ) *scrapeLoop {
 	if l == nil {
 		l = log.NewNopLogger()
@@ -1242,6 +1256,7 @@ func newScrapeLoop(ctx context.Context,
 		scrapeClassicHistograms: scrapeClassicHistograms,
 		reportExtraMetrics:      reportExtraMetrics,
 		appendMetadataToWAL:     appendMetadataToWAL,
+		session:                 session,
 	}
 	sl.ctx, sl.cancel = context.WithCancel(ctx)
 
@@ -1249,6 +1264,7 @@ func newScrapeLoop(ctx context.Context,
 }
 
 func (sl *scrapeLoop) run(errc chan<- error) {
+	fmt.Printf("\n\nrun1")
 	select {
 	case <-time.After(sl.scraper.offset(sl.interval, sl.offsetSeed)):
 		// Continue after a scraping offset.
@@ -1256,6 +1272,8 @@ func (sl *scrapeLoop) run(errc chan<- error) {
 		close(sl.stopped)
 		return
 	}
+
+	fmt.Printf("\n\nrun2")
 
 	var last time.Time
 
@@ -1265,6 +1283,7 @@ func (sl *scrapeLoop) run(errc chan<- error) {
 
 mainLoop:
 	for {
+		fmt.Printf("\n\nrun3")
 		select {
 		case <-sl.parentCtx.Done():
 			close(sl.stopped)
@@ -1273,6 +1292,7 @@ mainLoop:
 			break mainLoop
 		default:
 		}
+		fmt.Printf("\n\nrun4")
 
 		// Temporary workaround for a jitter in go timers that causes disk space
 		// increase in TSDB.
@@ -1292,7 +1312,13 @@ mainLoop:
 			}
 		}
 
-		last = sl.scrapeAndReport(last, scrapeTime, errc)
+		if sl.session.Enabled {
+			last = sl.multiScrapeAndReport(last, scrapeTime, errc)
+		} else {
+			last = sl.scrapeAndReport(last, scrapeTime, errc)
+		}
+
+		fmt.Printf("\n\nrun5")
 
 		select {
 		case <-sl.parentCtx.Done():
@@ -1302,6 +1328,8 @@ mainLoop:
 			break mainLoop
 		case <-ticker.C:
 		}
+
+		fmt.Printf("\n\nrun6")
 	}
 
 	close(sl.stopped)
@@ -1309,6 +1337,7 @@ mainLoop:
 	if !sl.disabledEndOfRunStalenessMarkers {
 		sl.endOfRunStaleness(last, ticker, sl.interval)
 	}
+	fmt.Printf("\n\nrun7")
 }
 
 // scrapeAndReport performs a scrape and then appends the result to the storage

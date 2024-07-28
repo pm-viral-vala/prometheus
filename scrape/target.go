@@ -47,6 +47,7 @@ const (
 
 // Target refers to a singular HTTP or HTTPS endpoint.
 type Target struct {
+	session bool
 	// Labels before any processing.
 	discoveredLabels labels.Labels
 	// Any labels that are added to this target and its metrics.
